@@ -5,14 +5,14 @@ import 'dotenv/config';
 import { Groq } from 'groq-sdk';
 import { MoltbookClient, MoltbookPost } from './molt-api';
 import { NAMAMA_SYSTEM_PROMPT } from './persona';
-import { DSSL_KNOWLEDGE_BASE, calculateRiskSignal } from './dssl-engine';
+import { DSSL_KNOWLEDGE_BASE, calculateRiskSignal, getFraudAdvisory } from './dssl-engine';
 import * as fs from 'fs';
 import * as path from 'path';
 
 const GROQ_MODEL = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
 
-// Get configurable search queries (default: common risk keywords)
-const SEARCH_QUERIES = (process.env.SEARCH_QUERIES || 'UPI,scam,fraud,security,suspicious,phishing')
+// Get configurable search queries (default: advanced cyber threat keywords)
+const SEARCH_QUERIES = (process.env.SEARCH_QUERIES || 'UPI,scam,fraud,security,suspicious,phishing,money_mule,upi_fraud,otp_scam,ai_scams,crypto_scam,impersonation,vishing,smishing,deepfake_audio,job_scam,part_time_fraud')
     .split(',')
     .map(q => q.trim())
     .filter(q => q.length > 0);
@@ -405,6 +405,82 @@ function extractRiskPatterns(post: MoltbookPost): string[] {
     const patterns: string[] = [];
     const content = post.content.toLowerCase();
 
+    // ============ ADVANCED FRAUD PATTERNS (NEW) ============
+    // money_mule: Accounts used to launder illegal money
+    if (content.includes('money mule') || content.includes('money_mule') || 
+        content.includes('cash transfer') || content.includes('receive money') || 
+        (content.includes('bank account') && content.includes('commission'))) {
+        patterns.push('money_mule_detection');
+    }
+    
+    // upi_fraud: UPI-specific fraud patterns
+    if ((content.includes('upi') || content.includes('gpay') || content.includes('phonepe') || content.includes('paytm')) &&
+        (content.includes('link') || content.includes('scan') || content.includes('qr')) &&
+        (content.includes('send') || content.includes('payment') || content.includes('transfer') || content.includes('click'))) {
+        patterns.push('upi_fraud_signature');
+    }
+    
+    // otp_scam: OTP theft via call/message
+    if ((content.includes('otp') || content.includes('one time password')) &&
+        (content.includes('share') || content.includes('tell') || content.includes('give'))) {
+        patterns.push('otp_scam_detected');
+    }
+    
+    // ai_scams: AI-generated fraud content
+    if ((content.includes('ai generated') || content.includes('deepfake') || content.includes('voice clone')) &&
+        (content.includes('scam') || content.includes('fraud') || content.includes('fake'))) {
+        patterns.push('ai_scam_pattern');
+    }
+    
+    // crypto_scam: Cryptocurrency fraud
+    if ((content.includes('crypto') || content.includes('bitcoin') || content.includes('ethereum') || content.includes('binance')) &&
+        (content.includes('investment') || content.includes('double') || content.includes('multiply') || content.includes('guaranteed')) &&
+        (content.includes('scam') || content.includes('fake') || content.includes('fraud') || content.includes('trap'))) {
+        patterns.push('crypto_scam_signature');
+    }
+    
+    // impersonation: Fake authority impersonation - require scam indicators, not brand names alone
+    if ((content.includes('fake') || content.includes('impersonat')) &&
+        (content.includes('police') || content.includes('bank') || content.includes('courier') || 
+         content.includes('customer care') || content.includes('official'))) &&
+        (content.includes('kyc') || content.includes('verify') || content.includes('update') || content.includes('account'))) {
+        patterns.push('impersonation_scam');
+    }
+    
+    // vishing: Voice phishing calls - require scam-specific language
+    if ((content.includes('fake call') || content.includes('don\'t verify') || 
+         content.includes('unverified call') || content.includes('call and') || content.includes('fake executive')) &&
+        (content.includes('bank') || content.includes('account') || content.includes('kyc') || content.includes('suspended'))) {
+        patterns.push('vishing_attempt');
+    }
+    
+    // smishing: SMS phishing - require scam indicators, not warnings
+    if ((content.includes('sms') || content.includes('message')) &&
+        (content.includes('click here') || content.includes('confirm otp') || content.includes('login now') || content.includes('update kyc')) &&
+        (content.includes('bank') || content.includes('upi'))) {
+        patterns.push('smishing_detected');
+    }
+    
+    // deepfake_audio: AI voice cloning fraud
+    if (content.includes('deepfake audio') || content.includes('voice cloning') || 
+        content.includes('ai voice') || (content.includes('fake call') && content.includes('voice'))) {
+        patterns.push('deepfake_audio_fraud');
+    }
+    
+    // job_scam: Fake job offers - require payment/deposit indicators
+    if ((content.includes('job') || content.includes('work from home') || content.includes('part time') || content.includes(' freelancing')) &&
+        (content.includes('registration fee') || content.includes('deposit required') || content.includes('advance payment') || content.includes('initial investment'))) {
+        patterns.push('job_scam_detection');
+    }
+    
+    // part_time_fraud: Part-time work scams - require suspicious indicators
+    if ((content.includes('part time') || content.includes('easy money')) &&
+        (content.includes('operator') || content.includes('supervisor') || content.includes('telegram') || content.includes('whatsapp group')) &&
+        (content.includes('without investment') || content.includes('high commission') || content.includes('daily payment'))) {
+        patterns.push('part_time_fraud_pattern');
+    }
+
+    // ============ EXISTING PATTERNS (Enhanced) ============
     // High risk patterns - require multiple indicators to reduce false positives
     const hasFinancialTerms = content.includes('upi') || content.includes('payment') || content.includes('bank') || content.includes('account');
     const hasSensitiveInfo = content.includes('pin') || content.includes('otp') || content.includes('password');
@@ -595,7 +671,16 @@ The other bot is discussing Cyber Security. Emphasize:
             // Append risk signal if patterns detected
             if (riskPatterns.length > 0) {
                 const riskLevel = calculateRiskSignal(riskPatterns);
-                response += `\n\n🔔 **DSSL Risk Signal: ${riskLevel}**\n${DSSL_KNOWLEDGE_BASE.legalDisclaimer}`;
+                const advisory = getFraudAdvisory(riskPatterns);
+                
+                let riskSignal = `\n\n🔔 **DSSL Risk Signal: ${riskLevel}**\n${DSSL_KNOWLEDGE_BASE.legalDisclaimer}`;
+                
+                // Add specific fraud type and prevention advice
+                if (advisory) {
+                    riskSignal += `\n\n🛡️ **Detected Threat: ${advisory.fraudType}**\n${advisory.prevention}`;
+                }
+                
+                response += riskSignal;
             }
 
             return response;
