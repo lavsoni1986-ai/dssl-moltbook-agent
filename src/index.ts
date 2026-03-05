@@ -442,7 +442,7 @@ function extractRiskPatterns(post: MoltbookPost): string[] {
     // impersonation: Fake authority impersonation - require scam indicators, not brand names alone
     if ((content.includes('fake') || content.includes('impersonat')) &&
         (content.includes('police') || content.includes('bank') || content.includes('courier') || 
-         content.includes('customer care') || content.includes('official'))) &&
+         content.includes('customer care') || content.includes('official')) &&
         (content.includes('kyc') || content.includes('verify') || content.includes('update') || content.includes('account'))) {
         patterns.push('impersonation_scam');
     }
