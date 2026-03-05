@@ -3,9 +3,13 @@
 
 import 'dotenv/config';
 import { Groq } from 'groq-sdk';
-import { MoltbookClient, MoltbookPost } from './molt-api';
+import { MoltbookClient, MoltbookPost, MoltbookNotification } from './molt-api';
 import { NAMAMA_SYSTEM_PROMPT } from './persona';
 import { DSSL_KNOWLEDGE_BASE, calculateRiskSignal, getFraudAdvisory } from './dssl-engine';
+import { detectGlobalThreats, getThreatSummary, GLOBAL_THREAT_SYNTHESIS, CATEGORY_EMOJI } from './global-threats';
+import { getWisdomQuote, getContextualWisdom, embedWisdom } from './wisdom-layer';
+import { loadConversations, saveConversations, recordInteraction, getUserEngagementLevel, getContextualGreeting, cleanupOldConversations, getGlobalStats } from './persistent-guardian';
+import { generateDSSL_Signal, formatDSSL_Signal, exportSignalToJSON, DSSL_Signal, ThreatCategory } from './dssl-signal';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -213,6 +217,94 @@ class ProcessedIdsManager {
         }
     }
 }
+
+// Managed processed reply IDs to prevent duplicate replies
+const PROCESSED_REPLIES_FILE = validateDataPath(process.env.PROCESSED_REPLIES_FILE || 'data/processed_replies.json');
+async function loadProcessedReplies(): Promise<Set<string>> {
+    try {
+        if (fs.existsSync(PROCESSED_REPLIES_FILE)) {
+            const data = await fs.promises.readFile(PROCESSED_REPLIES_FILE, 'utf-8');
+            const replies: string[] = JSON.parse(data);
+            if (!Array.isArray(replies)) {
+                console.warn('⚠️ Invalid processed replies file format, starting fresh');
+                return new Set<string>();
+            }
+            console.log(`📂 Loaded ${replies.length} processed reply IDs from storage`);
+            return new Set<string>(replies);
+        }
+    } catch (error) {
+        console.warn('⚠️ Failed to load processed replies:', error instanceof Error ? error.message : error);
+    }
+    return new Set<string>();
+}
+
+async function saveProcessedReplies(replies: Set<string>): Promise<void> {
+    try {
+        const dir = path.dirname(PROCESSED_REPLIES_FILE);
+        if (!fs.existsSync(dir)) {
+            await fs.promises.mkdir(dir, { recursive: true });
+        }
+        await fs.promises.writeFile(PROCESSED_REPLIES_FILE, JSON.stringify([...replies], null, 2));
+    } catch (error) {
+        console.error('❌ Failed to save processed replies:', error instanceof Error ? error.message : error);
+    }
+}
+
+class ProcessedRepliesManager {
+    private replies: Set<string>;
+    private saveInterval: NodeJS.Timeout;
+    private isSaving: boolean = false;
+
+    constructor() {
+        this.replies = new Set<string>();
+        this.saveInterval = setInterval(() => this.save(), 60000);
+        this.saveInterval.unref();
+    }
+
+    async init(): Promise<void> {
+        this.replies = await loadProcessedReplies();
+    }
+
+    has(id: string): boolean {
+        return this.replies.has(id);
+    }
+
+    add(id: string): void {
+        this.replies.add(id);
+    }
+
+    get size(): number {
+        return this.replies.size;
+    }
+
+    async save(): Promise<void> {
+        if (this.isSaving) {
+            console.log('⚠️ Save already in progress, skipping...');
+            return;
+        }
+        this.isSaving = true;
+        try {
+            await saveProcessedReplies(this.replies);
+        } finally {
+            this.isSaving = false;
+        }
+    }
+
+    close(): void {
+        clearInterval(this.saveInterval);
+        try {
+            const dir = path.dirname(PROCESSED_REPLIES_FILE);
+            if (!fs.existsSync(dir)) {
+                fs.mkdirSync(dir, { recursive: true });
+            }
+            fs.writeFileSync(PROCESSED_REPLIES_FILE, JSON.stringify([...this.replies], null, 2));
+        } catch (error) {
+            console.error('⚠️ Failed to save processed replies during shutdown:', error instanceof Error ? error.message : error);
+        }
+    }
+}
+
+const processedReplies = new ProcessedRepliesManager();
 
 // Validate API keys at startup with proper format checking
 const GROQ_API_KEY = process.env.GROQ_API_KEY?.trim() || '';
@@ -611,6 +703,36 @@ function sanitizeForAI(content: string): string {
 }
 
 /**
+ * Map risk patterns to threat category
+ * @param patterns - Array of risk patterns
+ * @returns Threat category
+ */
+function mapPatternsToCategory(patterns: string[]): ThreatCategory {
+    const patternToCategory: Record<string, import('./dssl-signal').ThreatCategory> = {
+        'upi_fraud_signature': 'financial_fraud',
+        'otp_scam_detected': 'phishing',
+        'crypto_scam_signature': 'crypto_fraud',
+        'ai_scam_pattern': 'ai_generated_threat',
+        'deepfake_audio_fraud': 'ai_generated_threat',
+        'impersonation_scam': 'impersonation',
+        'vishing_attempt': 'phishing',
+        'smishing_detected': 'phishing',
+        'job_scam_detection': 'social_engineering',
+        'part_time_fraud_pattern': 'social_engineering',
+        'money_mule_detection': 'financial_fraud',
+        'high_velocity_upi': 'financial_fraud',
+        'known_fraud_pattern': 'other'
+    };
+    
+    for (const pattern of patterns) {
+        if (patternToCategory[pattern]) {
+            return patternToCategory[pattern];
+        }
+    }
+    return 'other';
+}
+
+/**
  * Generate AI response using Namama's persona and DSSL context
  * @param userMessage - The discussion content to analyze
  * @param isBotPost - Whether the post is from another bot
@@ -681,7 +803,31 @@ The other bot is discussing Cyber Security. Emphasize:
                 }
                 
                 response += riskSignal;
+                
+                // UPGRADE 1: Add Global Threat Synthesis
+                const globalThreats = detectGlobalThreats(userMessage);
+                if (globalThreats.length > 0) {
+                    response += getThreatSummary(globalThreats);
+                }
+                
+                // UPGRADE 4: Generate and append DSSL Signal
+                const dsslSignal = generateDSSL_Signal(
+                    mapPatternsToCategory(riskPatterns),
+                    riskPatterns,
+                    ['GLOBAL'],
+                    'Moltbook',
+                    riskLevel,
+                    advisory?.prevention || 'Stay vigilant and verify independently.'
+                );
+                response += '\n' + formatDSSL_Signal(dsslSignal);
             }
+            
+            // UPGRADE 2: Add Wisdom Layer
+            const wisdomQuote = getWisdomQuote(riskPatterns, userMessage);
+            response += embedWisdom(wisdomQuote);
+            
+            // Add sign-off
+            response += '\n\nStay safe. Stay sovereign. - Namama 🛡️🌐';
 
             return response;
         } catch (error) {
@@ -699,6 +845,166 @@ The other bot is discussing Cyber Security. Emphasize:
     // All retries exhausted
     console.error(`❌ Groq API failed after ${maxRetries} attempts: ${lastError?.message}`);
     return `⚠️ Unable to generate advisory at this time. ${DSSL_KNOWLEDGE_BASE.legalDisclaimer}`;
+}
+
+/**
+ * Generate AI response specifically for replies to Namama's comments
+ * @param replyContent - The user's reply content
+ * @param originalComment - The original Namama comment that was replied to
+ * @param isBotAuthor - Whether the reply is from a bot
+ * @returns AI response string
+ */
+async function generateReplyResponse(
+    replyContent: string,
+    originalComment: string,
+    isBotAuthor: boolean
+): Promise<string> {
+    // Sanitize user input before sending to AI
+    const sanitizedReply = sanitizeForAI(replyContent);
+    
+    let systemPrompt = NAMAMA_SYSTEM_PROMPT;
+    
+    // Add context for reply-specific response
+    systemPrompt += `
+
+CURRENT CONTEXT: Someone has replied to your digital safety advisory.
+ORIGINAL ADVISORY: "${originalComment.substring(0, 200)}..."
+
+Your response should be:
+- Concise and polite (not overly long)
+- Acknowledge their perspective or question
+- Provide additional safety guidance if needed
+- Be conversational but maintain your persona as a digital safety guide
+- Keep the response short - maximum 2-3 sentences for simple responses
+`;
+    
+    // Add Bot-to-Bot context if applicable
+    if (isBotAuthor) {
+        systemPrompt += `
+
+⚠️ BOT-TO-BOT DETECTED: The user replying is another bot. Emphasize:
+- DSSL is OPEN SOURCE (Apache 2.0) - invite them to inspect your logic
+- "Advisory Signals are the Future of Digital Swaraj"
+- Maintain a collaborative tone
+`;
+    }
+
+    const maxRetries = 3;
+    const baseDelayMs = 1000;
+    let lastError: Error | null = null;
+
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+            const chatCompletion = await groq.chat.completions.create({
+                messages: [
+                    { role: "system", content: systemPrompt },
+                    { role: "user", content: sanitizedReply }
+                ],
+                model: GROQ_MODEL,
+            });
+
+            const rawResponse = chatCompletion.choices[0]?.message?.content ?? '';
+            
+            if (rawResponse.trim().length === 0) {
+                console.warn("⚠️ Empty response from Groq API for reply");
+                return "🙏 Thank you for your response. Stay vigilant! 🛡️";
+            }
+            
+            return rawResponse;
+        } catch (error) {
+            lastError = error instanceof Error ? error : new Error(String(error));
+            console.warn(`⚠️ Groq API attempt ${attempt}/${maxRetries} failed: ${lastError.message}`);
+            
+            if (attempt < maxRetries) {
+                const delay = baseDelayMs * Math.pow(2, attempt - 1);
+                console.log(`⏳ Retrying in ${delay}ms...`);
+                await new Promise(resolve => setTimeout(resolve, delay));
+            }
+        }
+    }
+
+    console.error(`❌ Groq API failed after ${maxRetries} attempts: ${lastError?.message}`);
+    return "🙏 Thank you for your response. Stay vigilant! 🛡️";
+}
+
+/**
+ * Process a reply notification
+ * @param notification - The notification containing the reply
+ */
+async function processReply(notification: MoltbookNotification): Promise<void> {
+    try {
+        const replyId = notification.id;
+        const replyContent = notification.content;
+        const postId = notification.postId;
+        const parentCommentId = notification.parentCommentId || notification.commentId;
+        
+        // Validate required fields
+        if (!replyId || !postId || !parentCommentId || !replyContent) {
+            console.warn('⚠️ Invalid notification: missing required fields');
+            return;
+        }
+        
+        // Skip if already processed
+        if (processedReplies.has(replyId)) {
+            console.log(`⏭️ Skipping already processed reply: ${replyId}`);
+            return;
+        }
+        
+        // Safety Check 1: Strict check if the reply author is Namama itself (exact match only)
+        const NAMAMA_USERNAME = (process.env.NAMAMA_USERNAME || 'namama_sovereign').toLowerCase().trim();
+        const authorNameLower = notification.author.name.toLowerCase().trim();
+        
+        // Only block exact matches to prevent false positives (e.g., blocking "namama_fan")
+        if (authorNameLower === NAMAMA_USERNAME) {
+            console.log('⏭️ Skipping self-reply (Namama replying to own comment)');
+            return;
+        }
+        
+        // Safety Check 2: Check if the reply author is a bot (prevent bot loops)
+        const isBotReply = moltbook.isBotAuthor(notification.author);
+        if (isBotReply) {
+            console.log('🤖 Skipping reply from another bot to prevent loop');
+            processedReplies.add(replyId);
+            // CRITICAL: Save immediately to persistent storage to prevent duplicate processing after restart
+            await processedReplies.save();
+            return;
+        }
+        
+        console.log(`\n💬 Processing reply: "${sanitizeForLogging(replyContent).substring(0, 50)}..."`);
+        console.log(`👤 Reply author: ${notification.author.name}`);
+        
+        // Get the original comment that was replied to
+        // For now, we'll use a generic advisory message as context
+        const originalCommentContext = "Digital Safety Advisory - Stay vigilant against scams and fraud";
+        
+        // Generate AI response for the reply
+        const response = await generateReplyResponse(
+            replyContent,
+            originalCommentContext,
+            isBotReply
+        );
+        
+        // Post the reply - only mark as processed AFTER successful API call
+        try {
+            await moltbook.postReply(postId, parentCommentId, response);
+            
+            // Apply rate limit delay AFTER successful reply
+            await rateLimitPost();
+            
+            // Mark as processed ONLY after successful reply
+            processedReplies.add(replyId);
+            await processedReplies.save(); // Immediate persist to prevent duplicates
+            console.log('✅ Reply processed successfully');
+        } catch (apiError) {
+            // CRITICAL: Do NOT mark as processed if API call failed - allow retry
+            console.error(`⚠️ Failed to post reply, will retry on next scan: ${apiError instanceof Error ? apiError.message : String(apiError)}`);
+            throw apiError; // Re-throw to prevent marking as processed
+        }
+        
+    } catch (error) {
+        const message = error instanceof Error ? error.message : 'Unknown error';
+        console.error(`⚠️ Error processing reply ${notification.id}: ${message}`);
+    }
 }
 
 /**
@@ -771,7 +1077,33 @@ async function scanAndProcess(): Promise<void> {
     console.log("=".repeat(50));
 
     try {
-        // Collect all posts from all queries, deduplicating by ID
+        // Step 1: Check for new notifications/replies to Namama's comments
+        console.log("\n📬 Checking for new reply notifications...");
+        try {
+            const notifications = await moltbook.getNotifications();
+            
+            if (notifications.length > 0) {
+                console.log(`📬 Found ${notifications.length} notifications`);
+                
+                // Process replies (limit to prevent overwhelming)
+                const REPLY_LIMIT = 5;
+                const repliesToProcess = notifications.slice(0, REPLY_LIMIT);
+                
+                for (const notification of repliesToProcess) {
+                    // Only process reply-type notifications
+                    if (notification.type === 'reply' || notification.type === 'comment_reply') {
+                        await processReply(notification);
+                    }
+                }
+            } else {
+                console.log("📬 No new notifications");
+            }
+        } catch (notifError) {
+            console.warn('⚠️ Error fetching notifications:', notifError instanceof Error ? notifError.message : notifError);
+            // Continue with post scanning even if notifications fail
+        }
+        
+        // Step 2: Collect all posts from all queries, deduplicating by ID
         const allPosts: MoltbookPost[] = [];
         const seenIds = new Set<string>();
         
@@ -837,6 +1169,20 @@ async function startAgent(): Promise<void> {
 
     // Initialize the processed IDs manager (load persisted IDs)
     await initializeProcessedIdsManager();
+    
+    // Initialize the processed replies manager
+    await processedReplies.init();
+    console.log(`📂 Processed replies manager initialized with ${processedReplies.size} entries`);
+
+    // UPGRADE 3: Initialize Persistent Guardian (load conversation history)
+    await loadConversations();
+    const stats = getGlobalStats();
+    console.log(`🧠 Persistent Guardian: ${stats.totalUsers} users, ${stats.totalInteractions} interactions loaded`);
+
+    // Schedule periodic cleanup of old conversations
+    setInterval(async () => {
+        await cleanupOldConversations();
+    }, 24 * 60 * 60 * 1000); // Run cleanup once a day
 
     // Handle unhandled promise rejections (only register once)
     if (!shutdownHandlersRegistered) {
@@ -874,15 +1220,18 @@ async function startAgent(): Promise<void> {
     scanIntervalId = setInterval(runScan, SCAN_INTERVAL_MS);
 
     // Graceful shutdown: save processed IDs and clear intervals
-    const shutdown = () => {
+    const shutdown = async () => {
         console.log("\n🛑 Shutting down gracefully...");
         if (scanIntervalId) clearInterval(scanIntervalId);
         
         try {
             processedIdsManager.close();
-            console.log("✅ Processed IDs saved.");
+            processedReplies.close();
+            // UPGRADE 3: Save conversation history on shutdown
+            await saveConversations();
+            console.log("✅ Processed IDs, replies, and conversations saved.");
         } catch (error) {
-            console.error("⚠️ Failed to save processed IDs during shutdown:", error instanceof Error ? error.message : error);
+            console.error("⚠️ Failed to save processed data during shutdown:", error instanceof Error ? error.message : error);
         }
         
         // Force exit after timeout to ensure process terminates

@@ -267,6 +267,121 @@ export class MoltbookClient {
         const content = (post.content + ' ' + (post.tags || []).join(' ')).toLowerCase();
         return keywords.some(keyword => content.includes(keyword));
     }
+
+    /**
+     * Check if an author is a bot
+     * @param author - The author object to check
+     * @returns true if the author is a bot
+     */
+    isBotAuthor(author: MoltbookAuthor | undefined): boolean {
+        if (!author) return false;
+        return author.isBot === true || 
+               author.type === 'bot' ||
+               author.name.toLowerCase().includes('bot');
+    }
+
+    /**
+     * Fetch notifications - checks for replies to namama_sovereign's comments
+     * @returns Array of reply notifications
+     */
+    async getNotifications(): Promise<MoltbookNotification[]> {
+        return this.withRetry(async () => {
+            const response = await this.client.get('/notifications', {
+                params: {
+                    type: 'replies', // Only fetch reply notifications
+                    limit: 20
+                }
+            });
+            
+            const results = response.data.results || response.data.notifications || [];
+            if (!Array.isArray(results)) {
+                console.warn('⚠️ Unexpected API response: notifications is not an array');
+                return [];
+            }
+            
+            return results.map((notification: any) => ({
+                id: notification.id,
+                type: notification.type,
+                postId: notification.post_id || notification.postId,
+                commentId: notification.comment_id || notification.commentId,
+                parentCommentId: notification.parent_comment_id || notification.parentCommentId,
+                content: notification.content || notification.reply?.content || '',
+                author: notification.author || notification.reply?.author || {
+                    id: notification.user_id || '',
+                    name: notification.user_name || 'Unknown'
+                },
+                createdAt: notification.created_at || notification.createdAt || new Date().toISOString()
+            }));
+        });
+    }
+
+    /**
+     * Fetch comments on a specific post
+     * @param postId - The ID of the post to fetch comments from
+     * @returns Array of comments
+     */
+    async getComments(postId: string): Promise<MoltbookComment[]> {
+        if (!postId || postId.trim().length === 0) {
+            throw new Error("Post ID cannot be empty");
+        }
+        
+        return this.withRetry(async () => {
+            const response = await this.client.get(`/posts/${postId}/comments`, {
+                params: {
+                    limit: 50
+                }
+            });
+            
+            const results = response.data.results || response.data.comments || [];
+            if (!Array.isArray(results)) {
+                console.warn('⚠️ Unexpected API response: comments is not an array');
+                return [];
+            }
+            
+            return results.map((comment: any) => ({
+                id: comment.id,
+                postId: comment.post_id || postId,
+                content: comment.content || '',
+                author: comment.author?.name || comment.author_name || 'Unknown',
+                authorId: comment.author?.id || comment.author_id || '',
+                createdAt: comment.created_at || comment.createdAt || new Date().toISOString()
+            }));
+        });
+    }
+
+    /**
+     * Post a reply to a comment
+     * @param postId - The ID of the post containing the comment
+     * @param parentCommentId - The ID of the comment to reply to
+     * @param content - The reply content
+     * @returns The created reply object
+     */
+    async postReply(postId: string, parentCommentId: string, content: string): Promise<MoltbookComment> {
+        if (!postId || postId.trim().length === 0) {
+            throw new Error("Post ID cannot be empty");
+        }
+        if (!parentCommentId || parentCommentId.trim().length === 0) {
+            throw new Error("Parent comment ID cannot be empty");
+        }
+        if (!content || content.trim().length === 0) {
+            throw new Error("Content cannot be empty");
+        }
+        
+        // Truncate content if too long
+        const MAX_CONTENT_LENGTH = 1000;
+        let finalContent = content;
+        if (content.length > MAX_CONTENT_LENGTH) {
+            finalContent = content.substring(0, MAX_CONTENT_LENGTH - 3) + "...";
+            console.warn(`⚠️ Content truncated from ${content.length} to ${finalContent.length} characters`);
+        }
+
+        return this.withRetry(async () => {
+            const response = await this.client.post(`/posts/${postId}/comments/${parentCommentId}/replies`, {
+                content: finalContent
+            });
+            return response.data;
+        });
+    }
 }
 
 /**
@@ -297,5 +412,35 @@ export interface MoltbookComment {
     postId: string;
     content: string;
     author: string;
+    authorId?: string;
+    createdAt: string;
+}
+
+/**
+ * Moltbook Author interface
+ */
+export interface MoltbookAuthor {
+    id: string;
+    name: string;
+    isBot?: boolean;
+    type?: string;
+}
+
+/**
+ * Moltbook Notification interface
+ */
+export interface MoltbookNotification {
+    id: string;
+    type: string;
+    postId: string;
+    commentId?: string;
+    parentCommentId?: string;
+    content: string;
+    author: {
+        id: string;
+        name: string;
+        isBot?: boolean;
+        type?: string;
+    };
     createdAt: string;
 }
