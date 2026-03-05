@@ -1,8 +1,12 @@
 {
   "name": "dssl-moltbook-agent",
   "version": "1.0.0",
-  "main": "index.js",
+  "type": "commonjs",
+  "main": "dist/index.js",
   "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "ts-node src/index.ts",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
@@ -12,10 +16,12 @@
   "devDependencies": {
     "@types/node": "^25.3.3",
     "axios": "^1.13.6",
-    "dotenv": "^17.3.1",
-    "openai": "^6.25.0",
     "ts-node": "^10.9.2",
     "typescript": "^5.9.3",
     "zod": "^4.3.6"
+  },
+  "dependencies": {
+    "dotenv": "^17.3.1",
+    "groq-sdk": "^0.37.0"
   }
 }
