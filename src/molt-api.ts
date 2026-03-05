@@ -36,7 +36,7 @@ export class MoltbookClient {
         this.baseDelayMs = 1000;
         
         // Validate API key at initialization
-        const apiKey = process.env.MOLTBOOK_API_KEY;
+        const apiKey = process.env.MOLTBOOK_API_KEY?.trim() || '';
         if (!apiKey) {
             throw new Error("MOLTBOOK_API_KEY is missing in .env file!");
         }
@@ -192,9 +192,21 @@ export class MoltbookClient {
             throw new Error("Content cannot be empty");
         }
         
-        // Input sanitization: remove potentially dangerous characters
-        const sanitizedTitle = title.replace(/[<>"'&]/g, '').trim();
-        const sanitizedContent = content.replace(/[<>"'&]/g, '').trim();
+        // Input sanitization: encode HTML entities to preserve content while preventing XSS
+        const sanitizedTitle = title
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;')
+            .trim();
+        const sanitizedContent = content
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;')
+            .trim();
         
         // सुरक्षा के लिए कंटेंट को 2000 अक्षरों तक सीमित (Truncate) करें
         const MAX_POST_LENGTH = 2000;
