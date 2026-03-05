@@ -223,17 +223,18 @@ export class MoltbookClient {
                 console.log('[DEBUG] createPost payload:', JSON.stringify({
                     title: finalTitle,
                     content: finalContent,
-                    tags: []
+                    submolt: process.env.MOLTBOOK_SUBMOLT_ID || "dssl",
+                    submolt_name: process.env.MOLTBOOK_SUBMOLT_NAME || "DSSL Safety Layer"
                 }));
             }
             
-            // Send title, content, tags, status and visibility
+            // Send title, content with Submolt (community/group) info
             const response = await this.client.post('/posts', {
                 title: finalTitle,
                 content: finalContent,
-                tags: [],
-                status: 'published',
-                visibility: 'public'
+                // Use environment variable for Submolt ID, default to 'dssl'
+                submolt: process.env.MOLTBOOK_SUBMOLT_ID || "dssl",
+                submolt_name: process.env.MOLTBOOK_SUBMOLT_NAME || "DSSL Safety Layer"
             });
             return response.data;
         });
