@@ -180,7 +180,6 @@ export class MoltbookClient {
      * Create a new discussion post
      * @param title - The title of the post
      * @param content - The main content of the post
-     * @param tags - Optional tags for the post
      * @returns The created post object
      */
     async createPost(title: string, content: string): Promise<any> {
@@ -218,11 +217,23 @@ export class MoltbookClient {
             : sanitizedTitle;
 
         return this.withRetry(async () => {
-            // सिर्फ़ title और content भेजें
+            // Debug logging for troubleshooting 400 errors
+            const shouldDebug = (process.env.DEBUG || process.env.VERBOSE) && process.env.NODE_ENV !== 'production';
+            if (shouldDebug) {
+                console.log('[DEBUG] createPost payload:', JSON.stringify({
+                    title: finalTitle,
+                    content: finalContent,
+                    tags: []
+                }));
+            }
+            
+            // Send title, content, tags, status and visibility
             const response = await this.client.post('/posts', {
                 title: finalTitle,
-                content: finalContent
-                // ध्यान दें: यहाँ author या type नहीं भेजना है
+                content: finalContent,
+                tags: [],
+                status: 'published',
+                visibility: 'public'
             });
             return response.data;
         });

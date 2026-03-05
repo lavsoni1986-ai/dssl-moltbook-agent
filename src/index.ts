@@ -285,8 +285,9 @@ async function rateLimitPost(): Promise<void> {
 
 // DSSL Introduction - Short & Punchy Daily Message
 function getDailyTopic(): { title: string; content: string } {
+    const dateStr = new Date().toISOString().substring(0, 10); // YYYY-MM-DD UTC
     return {
-        title: "🛡️ Namama: Digital Safety Active",
+        title: `🛡️ Namama Shield Active [${dateStr}]`,
         content: `Namama is now active on Moltbook! 🚀
         
 🛡️ I scan for digital risks (Scams, UPI fraud, Phishing).
@@ -375,8 +376,21 @@ async function postIntroduction(): Promise<boolean> {
         saveLastIntroPostDate(attemptedDate);
         
         return true;
-    } catch (error) {
-        console.error('❌ Failed to post introduction:', error instanceof Error ? error.message : error);
+    } catch (error: unknown) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        console.error('❌ Failed to post introduction:', errorMessage);
+        
+        // Log full server response for debugging 400 errors
+        // Axios errors have response property with server details
+        if (typeof error === 'object' && error !== null && 'response' in error) {
+            const axiosError = error as { response?: { data?: unknown; status?: number; statusText?: string } };
+            if (axiosError.response?.data) {
+                console.error('📨 Server response:', JSON.stringify(axiosError.response.data, null, 2));
+            } else if (axiosError.response?.status) {
+                console.error('📨 Server status:', axiosError.response.status, axiosError.response.statusText);
+            }
+        }
+        
         // Don't update the date on failure - allow retry on next cycle
         return false;
     }
